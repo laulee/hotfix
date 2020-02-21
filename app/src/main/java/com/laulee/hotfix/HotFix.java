@@ -26,22 +26,31 @@ public class HotFix {
     public static void installPatch(Application myApplication, File patchFile) {
         if (patchFile.exists()) {
             Log.d(TAG, "installPatch");
-            //1、将补丁包转换成element[]
-            ClassLoader classLoader = myApplication.getClassLoader();
-            //1.1通过反射获取classLoader中的pathlist属性
-            Field dexPathListField = findField(classLoader, "pathList");
-
-            ArrayList<File> files = new ArrayList<>();
-            files.add(patchFile);
-            ArrayList<IOException> exceptions = new ArrayList<>();
-            File dirFile = myApplication.getFilesDir();
-            Object dexPathList = null;
             try {
+                ClassLoader classLoader = myApplication.getClassLoader();
+                //Android N 混合编译导致一些频繁使用的热代码class被添加到app image 中，导致热修复不成功，
+                // 采用微信Tinker自定义PathClassLoader替换系统的，这样就能保证加载我们新增的class
+                if (Build.VERSION.SDK_INT > Build.VERSION_CODES.N) {
+                    try {
+                        classLoader = NewClassLoaderInjector.inject(myApplication, classLoader);
+                    } catch (Throwable throwable) {
+                        throwable.printStackTrace();
+                    }
+                }
+                //1、将补丁包转换成element[]
+                //1.1通过反射获取classLoader中的pathlist属性
+                Field dexPathListField = ShareReflectUtil.findField(classLoader, "pathList");
+
+                ArrayList<File> files = new ArrayList<>();
+                files.add(patchFile);
+                ArrayList<IOException> exceptions = new ArrayList<>();
+                File dirFile = myApplication.getFilesDir();
+                Object dexPathList = null;
                 dexPathList = dexPathListField.get(classLoader);
                 //通过反射获取makeDexElement方法
                 Object[] elements = makeDexElements(dexPathList, files, dirFile, exceptions, classLoader);
                 //获取原来的elements数组
-                Field oldField = findField(dexPathList, "dexElements");
+                Field oldField = ShareReflectUtil.findField(dexPathList, "dexElements");
                 Object[] oldElements = (Object[]) oldField.get(dexPathList);
                 Object[] mergeElement = copyArray(elements, oldElements);
                 //将合并后的element加载进去
@@ -51,6 +60,8 @@ public class HotFix {
             } catch (InvocationTargetException e) {
                 e.printStackTrace();
             } catch (NoSuchMethodException e) {
+                e.printStackTrace();
+            } catch (NoSuchFieldException e) {
                 e.printStackTrace();
             }
         }
@@ -70,7 +81,7 @@ public class HotFix {
         //7.0+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             Method makeDexElementsMetod =
-                    findMethod(dexPathList, "makeDexElements", List.class, File.class,
+                    ShareReflectUtil.findMethod(dexPathList, "makeDexElements", List.class, File.class,
                             List.class, ClassLoader.class);
             return (Object[]) makeDexElementsMetod.invoke(dexPathList, files, optimizedDirectory,
                     suppressedExceptions, classloader);
@@ -78,7 +89,7 @@ public class HotFix {
         //6.0+
         else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Method makeDexElementsMetod =
-                    findMethod(dexPathList, "makePathElements", List.class, File.class,
+                    ShareReflectUtil.findMethod(dexPathList, "makePathElements", List.class, File.class,
                             List.class);
             return (Object[]) makeDexElementsMetod.invoke(dexPathList, files, optimizedDirectory,
                     suppressedExceptions);
@@ -86,7 +97,7 @@ public class HotFix {
         //4.4.4-5.0+
         else {
             Method makeDexElementsMetod =
-                    findMethod(dexPathList, "makeDexElements", ArrayList.class, File.class,
+                    ShareReflectUtil.findMethod(dexPathList, "makeDexElements", ArrayList.class, File.class,
                             ArrayList.class);
 
             return (Object[]) makeDexElementsMetod.invoke(dexPathList, files, optimizedDirectory,
@@ -107,51 +118,5 @@ public class HotFix {
         //再拷贝原来的element[]
         System.arraycopy(oldElements, 0, merge, elements.length, oldElements.length);
         return merge;
-    }
-
-    /**
-     * @param object
-     * @param name
-     * @param classTypes
-     * @return
-     */
-    private static Method findMethod(Object object, String name, Class<?>... classTypes) {
-        Class<?> classz = object.getClass();
-        try {
-            Method method = classz.getDeclaredMethod(name, classTypes);
-            if (!method.isAccessible()) {
-                method.setAccessible(true);
-            }
-            return method;
-        } catch (NoSuchMethodException e) {
-            e.printStackTrace();
-        }
-        return null;
-    }
-
-    /**
-     * 通过反射获取对象
-     *
-     * @param object
-     * @param pathList
-     * @return
-     */
-    private static Field findField(Object object, String pathList) {
-        Class<?> classz = object.getClass();
-        while (classz != null) {
-            try {
-                Field field = classz.getDeclaredField(pathList);
-                if (field != null) {
-                    if (!field.isAccessible()) {
-                        field.setAccessible(true);
-                    }
-                    return field;
-                }
-            } catch (NoSuchFieldException e) {
-
-            }
-            classz = classz.getSuperclass();
-        }
-        return null;
     }
 }
