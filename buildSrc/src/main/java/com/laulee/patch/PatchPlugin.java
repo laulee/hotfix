@@ -13,8 +13,10 @@ import org.gradle.api.Project;
 import org.gradle.api.Task;
 import org.gradle.api.tasks.TaskOutputs;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Map;
@@ -76,14 +78,14 @@ public class PatchPlugin implements Plugin<Project> {
      * @param applicationVariant
      * @param patchExtension
      */
-    private void configTasks(Project project, ApplicationVariant applicationVariant, PatchExtension patchExtension) {
+    private void configTasks(Project project, final ApplicationVariant applicationVariant, PatchExtension patchExtension) {
 
 
         //获得：debug、release模式
-        String variantName = applicationVariant.getName();
+        final String variantName = applicationVariant.getName();
         //首字母大写
         String capitalizeName = Utils.capitalize(variantName);
-        //创建惹媳妇输出目录
+        //创建热修复输出目录
         File outputDir;
         //如果没配置 默认创建在build/patch/debug(release)目录下
         if (Util.isEmpty(patchExtension.output)) {
@@ -132,7 +134,6 @@ public class PatchPlugin implements Plugin<Project> {
         File patchClassFile = new File(outputDir, "patchClass.jar");
         //用dx打包生成的jar
         File patchFile = new File(outputDir, "patch.jar");
-
         //打包dex任务
         Task dexTask = project.getTasks().findByName("transformClassesWithDexBuilderFor" + capitalizeName);
 
@@ -141,23 +142,60 @@ public class PatchPlugin implements Plugin<Project> {
         dexTask.doFirst(new Action<Task>() {
             @Override
             public void execute(Task task) {
-
+                project.getLogger().error("dex task do first");
                 String applicationName = patchExtension.applicationName;
                 applicationName = applicationName.replaceAll("//.", Matcher.quoteReplacement(File.separator));
-
-                PatchGenerator patchGenerator = new PatchGenerator(patchClassFile, patchFile, mappingBak);
+                project.getLogger().error(applicationName);
+                PatchGenerator patchGenerator = new PatchGenerator(project, patchClassFile,
+                        patchFile, hashTxt);
                 //记录类的md5
                 Map<String, String> newHexs = new HashMap<>();
-                //任务的输入。dex打包任务要输入什么，自然是所有的class与jar包了
+                //任务的输入.dex打包任务要输入什么，自然是所有的class与jar包了
                 Set<File> files = dexTask.getInputs().getFiles().getFiles();
                 for (File file : files) {
                     String filePath = file.getAbsolutePath();
                     if (filePath.endsWith(".jar")) {
-                        processJar(applicationName, patchGenerator, file, newHexs);
+                        processJar(project, applicationName, patchGenerator, file, newHexs);
+                    } else if (filePath.endsWith(".class")) {
+                        processClass(applicationName, applicationVariant.getDirName(), patchGenerator, file, newHexs);
                     }
                 }
+
+                Util.write(newHexs, hashTxt);
+
+                //生成差异包
+                patchGenerator.generator();
             }
         });
+    }
+
+    /**
+     * 过滤class文件
+     *
+     * @param applicationName
+     * @param dirName
+     * @param patchGenerator
+     * @param file
+     * @param newHexs
+     */
+    private void processClass(String applicationName, String dirName, PatchGenerator patchGenerator, File file, Map<String, String> newHexs) {
+
+        String filePath = file.getAbsolutePath();
+
+        //去除前缀
+        String className = filePath.split(dirName)[1].substring(1);
+
+        if (className.equals(applicationName) || Util.isAndroidClass(className)) {
+            return;
+        }
+
+        byte[] bytes = Util.file2byte(file);
+
+        String md5 = Util.md5(bytes);
+
+        newHexs.put(className, md5);
+
+        patchGenerator.checkClass(className, md5, bytes);
     }
 
     /**
@@ -168,33 +206,40 @@ public class PatchPlugin implements Plugin<Project> {
      * @param file
      * @param newHexs
      */
-    private void processJar(String applicationName, PatchGenerator patchGenerator, File file, Map<String, String> newHexs) {
-
+    private void processJar(Project project, String applicationName,
+                            PatchGenerator patchGenerator, File file, Map<String, String> newHexs) {
         applicationName = applicationName.replaceAll(Matcher.quoteReplacement(File.separator), "/");
-
-        File bakJar = new File(file.getParent(), file.getName() + ".bak");
-
         try {
             JarFile jarFile = new JarFile(file);
             Enumeration<JarEntry> enumerations = jarFile.entries();
             while (enumerations.hasMoreElements()) {
-
                 JarEntry jarEntry = enumerations.nextElement();
-
                 String className = jarEntry.getName();
+
+                InputStream is = jarFile.getInputStream(jarEntry);
+
                 if (className.endsWith(".class") && !className.startsWith(applicationName)
                         && !Util.isAndroidClass(className) && !className.startsWith("com/laulee/patch")) {
-                    byte[] bytes = Util.file2byte(file);
-                    String hex = Util.md5(bytes);
-                    newHexs.put(className, hex);
+                    byte[] bytes = new byte[100];
+                    ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+                    int rc = 0;
+                    while ((rc = is.read(bytes, 0, 100)) > 0) {
+                        byteArrayOutputStream.write(bytes, 0, rc);
+                    }
+                    byte[] result = byteArrayOutputStream.toByteArray();
+                    is.close();
 
+                    String hex = Util.md5(result);
+                    project.getLogger().error(className + "===" + hex);
+                    newHexs.put(className, hex);
                     //对比缓存的md5不一致则放入补丁中
-                    patchGenerator.checkClass(className, hex, bytes);
+                    patchGenerator.checkClass(className, hex, result);
                 }
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
-
     }
+
+
 }

@@ -11,6 +11,15 @@ class PatchExtension {
 
     String output;
 
+    public PatchExtension() {
+
+    }
+
+    public PatchExtension(boolean debugOn, String applicationName, String output) {
+        this.debugOn = debugOn;
+        this.applicationName = applicationName;
+        this.output = output;
+    }
 
     public boolean isDebugOn() {
         return debugOn;
